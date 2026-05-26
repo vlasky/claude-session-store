@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# shellcheck source=bin/_session-lock
+source "$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)/_session-lock"
+
+usage() {
+  echo "Usage: session-get KEY"
+  echo ""
+  echo "Retrieve a value previously stored with session-set."
+  echo "Outputs the value to stdout. Exits with code 1 if key not found."
+  echo ""
+  echo "Examples:"
+  echo "  session-get deck"
+  echo "  COUNT=\$(session-get counter)"
+  exit 1
+}
+
+if [ -z "${CLAUDE_SESSION_DIR:-}" ]; then
+  echo "Error: CLAUDE_SESSION_DIR not set. Is the claude-session-store plugin active?" >&2
+  exit 1
+fi
+
+if [ $# -lt 1 ]; then
+  usage
+fi
+
+KEY="$1"
+
+if ! valid_key "$KEY"; then
+  echo "Error: Key must be alphanumeric (hyphens and underscores allowed)." >&2
+  exit 1
+fi
+
+FILE="${CLAUDE_SESSION_DIR}/${KEY}"
+
+if [ ! -f "$FILE" ]; then
+  echo "Error: Key '$KEY' not found." >&2
+  exit 1
+fi
+
+cat "$FILE"

@@ -1,0 +1,258 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# shellcheck source=bin/_session-lock
+source "$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)/_session-lock"
+
+usage() {
+  cat <<'EOF'
+Usage: session-list KEY COMMAND [ARGS...]
+
+Manage a list stored under KEY. Items are stored newline-separated.
+
+Commands:
+  add ITEM [ITEM...]       Append items to the list
+  rm ITEM [ITEM...]        Remove items from the list (first occurrence of each)
+  rm-all ITEM [ITEM...]    Remove all occurrences of each item
+  has ITEM                 Exit 0 if item is in the list, 1 otherwise
+  count                    Print the number of items
+  show                     Print all items (one per line)
+  clear                    Remove all items (deletes the key)
+  diff OTHER_KEY           Items in KEY that are not in OTHER_KEY
+  intersect OTHER_KEY      Items that are in both KEY and OTHER_KEY
+  union OTHER_KEY          Items in either KEY or OTHER_KEY (deduplicated)
+
+Examples:
+  session-list deck add A♠ 2♠ 3♠
+  session-list deck rm A♠ 3♠
+  session-list deck count
+  session-list deck has 2♠ && echo "still in deck"
+  session-list deck show
+  session-list all diff done       # items in 'all' not in 'done'
+  session-list a intersect b       # items common to both
+  session-list a union b           # combined, no duplicates
+EOF
+  exit 1
+}
+
+if [ -z "${CLAUDE_SESSION_DIR:-}" ]; then
+  echo "Error: CLAUDE_SESSION_DIR not set. Is the claude-session-store plugin active?" >&2
+  exit 1
+fi
+
+if [ $# -lt 2 ]; then
+  usage
+fi
+
+KEY="$1"
+CMD="$2"
+shift 2
+
+if ! valid_key "$KEY"; then
+  echo "Error: Key must be alphanumeric (hyphens and underscores allowed)." >&2
+  exit 1
+fi
+
+FILE="${CLAUDE_SESSION_DIR}/${KEY}"
+
+# Ensure file exists for commands that read it
+ensure_file() {
+  if [ ! -f "$FILE" ]; then
+    touch "$FILE"
+  fi
+}
+
+# Reject item values containing newlines (fail fast, before locking). Items are
+# stored one per line, so an embedded newline would split a single item into
+# multiple records, corrupting count/has/rm/rm-all.
+reject_newline_items() {
+  local it
+  for it in "$@"; do
+    if ! valid_item "$it"; then
+      echo "Error: list items cannot contain newlines." >&2
+      exit 1
+    fi
+  done
+}
+case "$CMD" in
+  add|rm|rm-all)
+    reject_newline_items "$@"
+    ;;
+  has)
+    if [ $# -ge 1 ]; then reject_newline_items "$1"; fi
+    ;;
+esac
+
+# Serialize every mutating command against concurrent writers (e.g. parallel
+# subagents). add must lock too: a concurrent append can be lost when rm later
+# mv's its temp copy over the key. Reads need no lock. Re-exec under the key's
+# lock so the locked worker runs identically whether with_lock uses flock(1)
+# or perl.
+case "$CMD" in
+  add|rm|rm-all|clear)
+    if [ "${_SESSION_LOCKED:-}" != "1" ]; then
+      with_lock "${CLAUDE_SESSION_DIR}/.locks/${KEY}" -- \
+        env _SESSION_LOCKED=1 "$0" "$KEY" "$CMD" "$@"
+      exit $?
+    fi
+    ;;
+esac
+
+case "$CMD" in
+  add)
+    if [ $# -eq 0 ]; then
+      echo "Error: 'add' requires at least one item." >&2
+      exit 1
+    fi
+    ensure_file
+    for item in "$@"; do
+      printf '%s\n' "$item" >> "$FILE"
+    done
+    ;;
+
+  rm)
+    if [ $# -eq 0 ]; then
+      echo "Error: 'rm' requires at least one item." >&2
+      exit 1
+    fi
+    ensure_file
+    # Temp files live in the hidden .locks dir so a crash can't leave stray
+    # files that session-keys would surface as bogus keys; trap cleans them up.
+    mkdir -p "${CLAUDE_SESSION_DIR}/.locks"
+    tmp="${CLAUDE_SESSION_DIR}/.locks/${KEY}.tmp.$$"
+    trap 'rm -f "$tmp" "${tmp}.2"' EXIT
+    cp "$FILE" "$tmp"
+    for item in "$@"; do
+      # Remove first occurrence only. Pass the item via ENVIRON, not -v: awk's
+      # -v assignment interprets backslash escapes, so a literal "\n" in an item
+      # would fail to match. ENVIRON gives awk the exact bytes.
+      target="$item" awk 'BEGIN { t = ENVIRON["target"] }
+        !found && $0 == t { found=1; next } 1' "$tmp" > "${tmp}.2"
+      mv "${tmp}.2" "$tmp"
+    done
+    mv "$tmp" "$FILE"
+    # Clean up empty file
+    if [ ! -s "$FILE" ]; then
+      rm -f "$FILE"
+    fi
+    ;;
+
+  rm-all)
+    if [ $# -eq 0 ]; then
+      echo "Error: 'rm-all' requires at least one item." >&2
+      exit 1
+    fi
+    ensure_file
+    mkdir -p "${CLAUDE_SESSION_DIR}/.locks"
+    tmp="${CLAUDE_SESSION_DIR}/.locks/${KEY}.tmp.$$"
+    trap 'rm -f "$tmp" "${tmp}.2"' EXIT
+    cp "$FILE" "$tmp"
+    for item in "$@"; do
+      # grep exit 1 just means "no lines left" (normal); >1 is a real error,
+      # which must not silently mv an empty/partial temp over the list.
+      grep -vxF -- "$item" "$tmp" > "${tmp}.2" && rc=0 || rc=$?
+      if [ "$rc" -gt 1 ]; then
+        echo "Error: failed to filter list '$KEY'." >&2
+        exit 1
+      fi
+      mv "${tmp}.2" "$tmp"
+    done
+    mv "$tmp" "$FILE"
+    if [ ! -s "$FILE" ]; then
+      rm -f "$FILE"
+    fi
+    ;;
+
+  has)
+    if [ $# -eq 0 ]; then
+      echo "Error: 'has' requires an item." >&2
+      exit 1
+    fi
+    if [ ! -f "$FILE" ]; then
+      exit 1
+    fi
+    grep -qxF -- "$1" "$FILE"
+    ;;
+
+  count)
+    if [ ! -f "$FILE" ] || [ ! -s "$FILE" ]; then
+      echo "0"
+    else
+      # awk avoids BSD wc's leading-space output, keeping count consistent.
+      awk 'END { print NR }' "$FILE"
+    fi
+    ;;
+
+  show)
+    if [ -f "$FILE" ]; then
+      cat "$FILE"
+    fi
+    ;;
+
+  clear)
+    rm -f "$FILE"
+    ;;
+
+  diff)
+    if [ $# -eq 0 ]; then
+      echo "Error: 'diff' requires another key." >&2
+      exit 1
+    fi
+    OTHER_KEY="$1"
+    if ! valid_key "$OTHER_KEY"; then
+      echo "Error: Key must be alphanumeric (hyphens and underscores allowed)." >&2
+      exit 1
+    fi
+    OTHER_FILE="${CLAUDE_SESSION_DIR}/${OTHER_KEY}"
+    if [ ! -f "$FILE" ] || [ ! -s "$FILE" ]; then
+      exit 0
+    fi
+    if [ ! -f "$OTHER_FILE" ] || [ ! -s "$OTHER_FILE" ]; then
+      cat "$FILE"
+    else
+      awk 'NR==FNR{seen[$0];next} !($0 in seen)' "$OTHER_FILE" "$FILE"
+    fi
+    ;;
+
+  intersect)
+    if [ $# -eq 0 ]; then
+      echo "Error: 'intersect' requires another key." >&2
+      exit 1
+    fi
+    OTHER_KEY="$1"
+    if ! valid_key "$OTHER_KEY"; then
+      echo "Error: Key must be alphanumeric (hyphens and underscores allowed)." >&2
+      exit 1
+    fi
+    OTHER_FILE="${CLAUDE_SESSION_DIR}/${OTHER_KEY}"
+    if [ ! -f "$FILE" ] || [ ! -s "$FILE" ]; then
+      exit 0
+    fi
+    if [ ! -f "$OTHER_FILE" ] || [ ! -s "$OTHER_FILE" ]; then
+      exit 0
+    fi
+    awk 'NR==FNR{seen[$0];next} $0 in seen' "$OTHER_FILE" "$FILE"
+    ;;
+
+  union)
+    if [ $# -eq 0 ]; then
+      echo "Error: 'union' requires another key." >&2
+      exit 1
+    fi
+    OTHER_KEY="$1"
+    if ! valid_key "$OTHER_KEY"; then
+      echo "Error: Key must be alphanumeric (hyphens and underscores allowed)." >&2
+      exit 1
+    fi
+    OTHER_FILE="${CLAUDE_SESSION_DIR}/${OTHER_KEY}"
+    {
+      if [ -f "$FILE" ] && [ -s "$FILE" ]; then cat "$FILE"; fi
+      if [ -f "$OTHER_FILE" ] && [ -s "$OTHER_FILE" ]; then cat "$OTHER_FILE"; fi
+    } | awk '!seen[$0]++'
+    ;;
+
+  *)
+    echo "Error: Unknown command '$CMD'. Use: add, rm, rm-all, has, count, show, clear, diff, intersect, union." >&2
+    exit 1
+    ;;
+esac

@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# shellcheck source=bin/_session-lock
+source "$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)/_session-lock"
+
+usage() {
+  echo "Usage: session-set KEY VALUE"
+  echo ""
+  echo "Store a key-value pair in the session scratch directory."
+  echo "The value persists for the lifetime of the session and is"
+  echo "automatically cleaned up when the session ends."
+  echo ""
+  echo "Keys are file-safe names (alphanumeric, hyphens, underscores)."
+  echo "Values are stored as plain text (one file per key)."
+  echo ""
+  echo "Examples:"
+  echo "  session-set deck '2♠ 3♠ 4♠ 5♠'"
+  echo "  session-set counter 42"
+  echo "  echo 'multi-line data' | session-set mykey -"
+  exit 1
+}
+
+if [ -z "${CLAUDE_SESSION_DIR:-}" ]; then
+  echo "Error: CLAUDE_SESSION_DIR not set. Is the claude-session-store plugin active?" >&2
+  exit 1
+fi
+
+if [ $# -lt 2 ]; then
+  usage
+fi
+
+KEY="$1"
+VALUE="$2"
+
+if ! valid_key "$KEY"; then
+  echo "Error: Key must be alphanumeric (hyphens and underscores allowed)." >&2
+  exit 1
+fi
+
+# Serialize against concurrent writers to the same key (incr/decr/list).
+# Re-exec under the key's lock; stdin (for VALUE=-) is inherited by the worker.
+if [ "${_SESSION_LOCKED:-}" != "1" ]; then
+  with_lock "${CLAUDE_SESSION_DIR}/.locks/${KEY}" -- env _SESSION_LOCKED=1 "$0" "$@"
+  exit $?
+fi
+
+if [ "$VALUE" = "-" ]; then
+  cat > "${CLAUDE_SESSION_DIR}/${KEY}"
+else
+  printf '%s\n' "$VALUE" > "${CLAUDE_SESSION_DIR}/${KEY}"
+fi

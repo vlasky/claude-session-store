@@ -1,0 +1,15 @@
+{
+  "name": "claude-session-store",
+  "version": "1.0.0",
+  "owner": {
+    "name": "vlasky"
+  },
+  "plugins": [
+    {
+      "name": "claude-session-store",
+      "source": "./",
+      "description": "Session-scoped scratch storage for Claude Code",
+      "category": "utilities"
+    }
+  ]
+}

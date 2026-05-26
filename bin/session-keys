@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "Usage: session-keys"
+  echo ""
+  echo "List all keys currently stored in the session."
+  echo "Outputs one key per line. Empty output if no keys exist."
+  echo ""
+  echo "Examples:"
+  echo "  session-keys"
+  echo "  session-keys | wc -l"
+  exit 1
+}
+
+if [ -z "${CLAUDE_SESSION_DIR:-}" ]; then
+  echo "Error: CLAUDE_SESSION_DIR not set. Is the claude-session-store plugin active?" >&2
+  exit 1
+fi
+
+if [ "${1:-}" = "--help" ]; then
+  usage
+fi
+
+if [ -d "$CLAUDE_SESSION_DIR" ]; then
+  # -exec basename is portable across GNU (Linux) and BSD (macOS) find;
+  # GNU-only -printf '%f' is avoided so this works on both.
+  find "$CLAUDE_SESSION_DIR" -maxdepth 1 -type f -exec basename {} \; | sort
+fi

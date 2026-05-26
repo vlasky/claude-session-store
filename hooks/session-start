@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SESSION_DIR="/tmp/claude-session-${CLAUDE_CODE_SESSION_ID}"
+# Defense-in-depth: refuse if the path is a symlink, so we never write scratch
+# data through an attacker-planted link. (The session ID is an unpredictable
+# UUID, so planting one is impractical; this is belt-and-suspenders.)
+if [ -L "$SESSION_DIR" ]; then
+  echo "claude-session-store: refusing to use symlinked session dir $SESSION_DIR" >&2
+  exit 1
+fi
+# umask 077 creates the dir as 0700 directly (/tmp is world-readable, so
+# other local users must not be able to read scratch data). Creating with
+# the right mode avoids a separate chmod that would follow a pre-existing
+# symlink at this path. mkdir -p stays idempotent across repeat SessionStarts.
+(umask 077; mkdir -p "$SESSION_DIR")
+# %q shell-quotes the path so the sourced env file can't be corrupted or
+# injected if the session ID ever contains shell metacharacters.
+printf 'export CLAUDE_SESSION_DIR=%q\n' "$SESSION_DIR" >> "$CLAUDE_ENV_FILE"

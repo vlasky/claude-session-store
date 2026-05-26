@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# shellcheck source=bin/_session-lock
+source "$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)/_session-lock"
+
+if [ -z "${CLAUDE_SESSION_DIR:-}" ]; then
+  echo "Error: CLAUDE_SESSION_DIR not set. Is the claude-session-store plugin active?" >&2
+  exit 1
+fi
+
+if [ $# -lt 1 ]; then
+  echo "Usage: session-decr KEY [AMOUNT]"
+  echo ""
+  echo "Decrement a numeric key by AMOUNT (default: 1)."
+  echo "Initializes to 0 if the key does not exist."
+  echo "Prints the new value."
+  exit 1
+fi
+
+KEY="$1"
+AMOUNT="${2:-1}"
+
+if ! valid_key "$KEY"; then
+  echo "Error: Key must be alphanumeric (hyphens and underscores allowed)." >&2
+  exit 1
+fi
+
+if ! valid_int "$AMOUNT"; then
+  echo "Error: AMOUNT must be an integer." >&2
+  exit 1
+fi
+
+FILE="${CLAUDE_SESSION_DIR}/${KEY}"
+
+# Serialize the read-modify-write against concurrent writers (e.g. parallel
+# subagents decrementing the same key). Re-exec under the key's lock so the
+# locked worker runs identically whether with_lock uses flock(1) or perl.
+if [ "${_SESSION_LOCKED:-}" != "1" ]; then
+  with_lock "${CLAUDE_SESSION_DIR}/.locks/${KEY}" -- env _SESSION_LOCKED=1 "$0" "$@"
+  exit $?
+fi
+
+if [ -f "$FILE" ]; then
+  CURRENT=$(cat "$FILE")
+  if ! valid_int "$CURRENT"; then
+    echo "Error: Value of '$KEY' is not an integer." >&2
+    exit 1
+  fi
+else
+  CURRENT=0
+fi
+
+# Normalize operands to base 10 (handles leading zeros / signs) and subtract
+# with bash int64 arithmetic, which is exact — unlike awk's float math.
+NEW=$(( $(to_int10 "$CURRENT") - $(to_int10 "$AMOUNT") ))
+printf '%s\n' "$NEW" > "$FILE"
+echo "$NEW"

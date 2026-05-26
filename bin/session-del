@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# shellcheck source=bin/_session-lock
+source "$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)/_session-lock"
+
+usage() {
+  echo "Usage: session-del KEY"
+  echo ""
+  echo "Delete a key from the session store."
+  echo "No error if the key doesn't exist."
+  echo ""
+  echo "Examples:"
+  echo "  session-del deck"
+  exit 1
+}
+
+if [ -z "${CLAUDE_SESSION_DIR:-}" ]; then
+  echo "Error: CLAUDE_SESSION_DIR not set. Is the claude-session-store plugin active?" >&2
+  exit 1
+fi
+
+if [ $# -lt 1 ]; then
+  usage
+fi
+
+KEY="$1"
+
+if ! valid_key "$KEY"; then
+  echo "Error: Key must be alphanumeric (hyphens and underscores allowed)." >&2
+  exit 1
+fi
+
+FILE="${CLAUDE_SESSION_DIR}/${KEY}"
+
+# Serialize against concurrent writers to the same key (incr/decr/list/set).
+if [ "${_SESSION_LOCKED:-}" != "1" ]; then
+  with_lock "${CLAUDE_SESSION_DIR}/.locks/${KEY}" -- env _SESSION_LOCKED=1 "$0" "$@"
+  exit $?
+fi
+
+rm -f "$FILE"
