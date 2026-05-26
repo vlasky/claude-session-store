@@ -1,0 +1,97 @@
+# Shared helpers for session-store CLI tools.
+# Sourced (not executed) by the CLI tools.
+#
+# Validation uses shell globs (byte-wise, no line splitting) rather than
+# `echo "$x" | grep -E '^...$'`: grep is line-oriented and returns success if
+# ANY line matches, so a multi-line value like $'../escape\nok' would slip
+# through and reach a file path. The case-glob checks below cannot be fooled
+# that way and need no subprocess.
+
+# These helpers force LC_ALL=C for the duration of the match: glob ranges like
+# [a-zA-Z] are locale-collated, so under a UTF-8 locale bash would fold accented
+# letters into the range (e.g. valid_key "café" would wrongly pass). The C
+# locale makes the ranges strictly byte-wise ASCII as documented.
+
+# valid_key KEY — true if KEY is non-empty and only [A-Za-z0-9_-].
+valid_key() {
+  local LC_ALL=C
+  case $1 in
+    '' | *[!a-zA-Z0-9_-]*) return 1 ;;
+  esac
+  return 0
+}
+
+# valid_int VALUE — true if VALUE is an optionally-signed base-10 integer.
+valid_int() {
+  local LC_ALL=C n=$1
+  case $n in -*) n=${n#-} ;; esac
+  case $n in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  return 0
+}
+
+# valid_item VALUE — true if VALUE is usable as a list item. Lists are stored
+# one item per line, so a value containing a newline would split into multiple
+# records and corrupt count/has/rm/rm-all; reject it.
+valid_item() {
+  local LC_ALL=C
+  case $1 in
+    *$'\n'*) return 1 ;;
+  esac
+  return 0
+}
+
+# to_int10 VALUE — print VALUE as a normalized base-10 integer (handles sign and
+# leading zeros). Assumes VALUE already passed valid_int. Uses bash arithmetic
+# (exact across the int64 range) rather than awk, whose float math loses
+# precision above 2^53 and can emit scientific notation.
+to_int10() {
+  local s=$1 sign=1
+  case $s in -*) sign=-1; s=${s#-} ;; esac
+  printf '%s\n' "$(( sign * 10#$s ))"
+}
+
+# Usage:  with_lock LOCKFILE -- command [args...]
+#
+# Runs the command while holding an exclusive lock on LOCKFILE, serializing
+# concurrent writers (e.g. parallel subagents touching the same key). The lock
+# is an OS-level advisory lock tied to a file descriptor, so the kernel releases
+# it automatically when the holder exits — even on kill -9 — meaning no stale
+# locks and no busy-waiting.
+#
+# Fast path: flock(1) (util-linux) when available. Fallback: perl's flock(2),
+# which is present on macOS (/usr/bin/perl) and virtually all Linux systems.
+
+with_lock() {
+  local lockfile="$1"
+  shift
+  [ "${1:-}" = "--" ] && shift
+
+  mkdir -p "$(dirname "$lockfile")"
+
+  if command -v flock >/dev/null 2>&1; then
+    # Hold the lock on fd 9 for the duration of the command, then close it.
+    exec 9>"$lockfile"
+    flock 9
+    "$@"
+    local rc=$?
+    exec 9>&-
+    return $rc
+  fi
+
+  # Fallback: perl acquires LOCK_EX, runs the command as a subprocess, and
+  # releases the lock on exit by closing the filehandle.
+  perl -e '
+    use Fcntl qw(:flock);
+    open(my $fh, ">", $ARGV[0]) or die "lock open: $!\n";
+    flock($fh, LOCK_EX) or die "flock: $!\n";
+    shift @ARGV;
+    system(@ARGV);
+    # Preserve the child status faithfully: exec failure, signal death, or
+    # normal exit. A bare ($? >> 8) would report success for a killed worker.
+    if ($? == -1)      { exit 127; }
+    elsif ($? & 127)   { exit 128 + ($? & 127); }
+    else               { exit($? >> 8); }
+  ' "$lockfile" "$@"
+}

@@ -1,0 +1,25 @@
+{
+  "description": "Session-scoped scratch storage lifecycle: create temp dir on start, clean up on end.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-start"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-end"
+          }
+        ]
+      }
+    ]
+  }
+}

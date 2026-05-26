@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SESSION_DIR="/tmp/claude-session-${CLAUDE_CODE_SESSION_ID}"
+
+if [ -d "$SESSION_DIR" ]; then
+  rm -rf "$SESSION_DIR"
+fi
