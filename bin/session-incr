@@ -9,14 +9,20 @@ if [ -z "${CLAUDE_SESSION_DIR:-}" ]; then
   exit 1
 fi
 
-if [ $# -lt 1 ]; then
-  echo "Usage: session-incr KEY [AMOUNT]"
+if [ $# -lt 1 ] || [ "${1:-}" = "--help" ]; then
+  echo "Usage: session-incr [--shared] KEY [AMOUNT]"
   echo ""
   echo "Increment a numeric key by AMOUNT (default: 1)."
   echo "Initializes to 0 if the key does not exist."
   echo "Prints the new value."
+  echo ""
+  echo "Options:"
+  echo "  --shared    Operate on shared namespace"
   exit 1
 fi
+
+parse_shared_flag "$@"
+set -- "${PARSE_ARGS[@]}"
 
 KEY="$1"
 AMOUNT="${2:-1}"
@@ -31,13 +37,14 @@ if ! valid_int "$AMOUNT"; then
   exit 1
 fi
 
-FILE="${CLAUDE_SESSION_DIR}/${KEY}"
+STORE_DIR=$(resolve_store_dir)
+FILE="${STORE_DIR}/${KEY}"
 
 # Serialize the read-modify-write against concurrent writers (e.g. parallel
 # subagents incrementing the same key). Re-exec under the key's lock so the
 # locked worker runs identically whether with_lock uses flock(1) or perl.
 if [ "${_SESSION_LOCKED:-}" != "1" ]; then
-  with_lock "${CLAUDE_SESSION_DIR}/.locks/${KEY}" -- env _SESSION_LOCKED=1 "$0" "$@"
+  with_lock "${STORE_DIR}/.locks/${KEY}" -- env _SESSION_LOCKED=1 _SESSION_SHARED="${_SESSION_SHARED}" "$0" ${_SESSION_SHARED:+--shared} "$KEY" "$AMOUNT"
   exit $?
 fi
 

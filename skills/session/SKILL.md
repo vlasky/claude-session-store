@@ -16,20 +16,22 @@ You have access to session-scoped scratch storage via `$CLAUDE_SESSION_DIR`. Dat
 
 ## Tools
 
+All commands accept an optional `--shared` flag to operate on the shared namespace (visible to all agents). Without `--shared`, subagents use their private namespace automatically.
+
 ### Key-Value
 
 | Command | Purpose |
 |---------|---------|
-| `session-set KEY VALUE` | Store a value (or pipe with `VALUE=-`) |
-| `session-get KEY` | Retrieve a value (exits 1 if missing) |
-| `session-del KEY` | Delete a key |
-| `session-incr KEY [AMOUNT]` | Increment numeric key by AMOUNT (default 1), init 0 if missing |
-| `session-decr KEY [AMOUNT]` | Decrement numeric key by AMOUNT (default 1), init 0 if missing |
-| `session-keys` | List all stored keys |
+| `session-set [--shared] KEY VALUE` | Store a value (or pipe with `VALUE=-`) |
+| `session-get [--shared] KEY` | Retrieve a value (exits 1 if missing) |
+| `session-del [--shared] KEY` | Delete a key |
+| `session-incr [--shared] KEY [AMOUNT]` | Increment numeric key by AMOUNT (default 1), init 0 if missing |
+| `session-decr [--shared] KEY [AMOUNT]` | Decrement numeric key by AMOUNT (default 1), init 0 if missing |
+| `session-keys [--shared]` | List all stored keys |
 
 ### Lists
 
-`session-list KEY COMMAND [ARGS...]` — manage ordered collections stored under a key. Items are stored newline-separated.
+`session-list [--shared] KEY COMMAND [ARGS...]` — manage ordered collections stored under a key. Items are stored newline-separated.
 
 | Command | Purpose |
 |---------|---------|
@@ -87,6 +89,29 @@ echo "data" > "$CLAUDE_SESSION_DIR/myfile"
 cat "$CLAUDE_SESSION_DIR/myfile"
 ```
 
+## Agent Namespacing
+
+When running inside a subagent, `$CLAUDE_AGENT_NS` is set automatically (via SubagentStart hook). This provides automatic namespace isolation:
+
+- **Without `--shared`** — reads/writes go to the agent's private namespace. Other agents cannot see these keys.
+- **With `--shared`** — reads/writes go to the shared namespace (same as the main session's root). All agents can access shared keys.
+- **In the main session** (no subagent) — everything goes to the shared namespace. `--shared` is accepted but has no effect.
+
+**Example — parallel simulations:**
+```bash
+# Parent sets shared config
+session-set --shared config '{"iterations": 100}'
+
+# Each subagent (CLAUDE_AGENT_NS set automatically):
+CONFIG=$(session-get --shared config)   # read parent's config
+session-incr progress                    # private counter
+session-set result "42.5"                # private result
+
+# Parent collects results by reading shared keys written by subagents
+```
+
+**When spawning parallel subagents that need isolated state, no manual namespace management is needed.** Each subagent automatically gets its own private area. Use `--shared` only when you intentionally want cross-agent visibility.
+
 ## Rules
 
 1. **Use this for state that only matters within the current session** — game state, running totals, intermediate results, deck tracking, etc.
@@ -95,3 +120,4 @@ cat "$CLAUDE_SESSION_DIR/myfile"
 4. **Don't store secrets.** The directory lives in `/tmp` and is world-readable.
 5. **Check before assuming.** Use `session-get` and check the exit code before using a value that may not exist yet.
 6. **Never compute complements manually.** When tracking a subset drawn from a known universe (deck, pool, roster), initialize the full collection with `add` first, then use `rm` to remove items as they're selected. Do not mentally subtract and type out the remainder — that's error-prone.
+7. **In subagents, use `--shared` to communicate with the parent.** Write results to shared keys so the parent (or other agents) can read them.

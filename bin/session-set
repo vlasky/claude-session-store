@@ -5,11 +5,14 @@ set -euo pipefail
 source "$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)/_session-lock"
 
 usage() {
-  echo "Usage: session-set KEY VALUE"
+  echo "Usage: session-set [--shared] KEY VALUE"
   echo ""
   echo "Store a key-value pair in the session scratch directory."
   echo "The value persists for the lifetime of the session and is"
   echo "automatically cleaned up when the session ends."
+  echo ""
+  echo "Options:"
+  echo "  --shared    Write to shared namespace (accessible by all agents)"
   echo ""
   echo "Keys are file-safe names (alphanumeric, hyphens, underscores)."
   echo "Values are stored as plain text (one file per key)."
@@ -18,6 +21,7 @@ usage() {
   echo "  session-set deck '2♠ 3♠ 4♠ 5♠'"
   echo "  session-set counter 42"
   echo "  echo 'multi-line data' | session-set mykey -"
+  echo "  session-set --shared results 'done'"
   exit 1
 }
 
@@ -25,6 +29,9 @@ if [ -z "${CLAUDE_SESSION_DIR:-}" ]; then
   echo "Error: CLAUDE_SESSION_DIR not set. Is the claude-session-store plugin active?" >&2
   exit 1
 fi
+
+parse_shared_flag "$@"
+set -- "${PARSE_ARGS[@]}"
 
 if [ $# -lt 2 ]; then
   usage
@@ -38,15 +45,17 @@ if ! valid_key "$KEY"; then
   exit 1
 fi
 
+STORE_DIR=$(resolve_store_dir)
+
 # Serialize against concurrent writers to the same key (incr/decr/list).
 # Re-exec under the key's lock; stdin (for VALUE=-) is inherited by the worker.
 if [ "${_SESSION_LOCKED:-}" != "1" ]; then
-  with_lock "${CLAUDE_SESSION_DIR}/.locks/${KEY}" -- env _SESSION_LOCKED=1 "$0" "$@"
+  with_lock "${STORE_DIR}/.locks/${KEY}" -- env _SESSION_LOCKED=1 _SESSION_SHARED="${_SESSION_SHARED}" "$0" ${_SESSION_SHARED:+--shared} "$KEY" "$VALUE"
   exit $?
 fi
 
 if [ "$VALUE" = "-" ]; then
-  cat > "${CLAUDE_SESSION_DIR}/${KEY}"
+  cat > "${STORE_DIR}/${KEY}"
 else
-  printf '%s\n' "$VALUE" > "${CLAUDE_SESSION_DIR}/${KEY}"
+  printf '%s\n' "$VALUE" > "${STORE_DIR}/${KEY}"
 fi

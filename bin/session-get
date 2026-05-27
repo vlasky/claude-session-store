@@ -5,14 +5,18 @@ set -euo pipefail
 source "$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)/_session-lock"
 
 usage() {
-  echo "Usage: session-get KEY"
+  echo "Usage: session-get [--shared] KEY"
   echo ""
   echo "Retrieve a value previously stored with session-set."
   echo "Outputs the value to stdout. Exits with code 1 if key not found."
   echo ""
+  echo "Options:"
+  echo "  --shared    Read from shared namespace"
+  echo ""
   echo "Examples:"
   echo "  session-get deck"
   echo "  COUNT=\$(session-get counter)"
+  echo "  session-get --shared config"
   exit 1
 }
 
@@ -20,6 +24,9 @@ if [ -z "${CLAUDE_SESSION_DIR:-}" ]; then
   echo "Error: CLAUDE_SESSION_DIR not set. Is the claude-session-store plugin active?" >&2
   exit 1
 fi
+
+parse_shared_flag "$@"
+set -- "${PARSE_ARGS[@]}"
 
 if [ $# -lt 1 ]; then
   usage
@@ -32,7 +39,8 @@ if ! valid_key "$KEY"; then
   exit 1
 fi
 
-FILE="${CLAUDE_SESSION_DIR}/${KEY}"
+STORE_DIR=$(resolve_store_dir)
+FILE="${STORE_DIR}/${KEY}"
 
 if [ ! -f "$FILE" ]; then
   echo "Error: Key '$KEY' not found." >&2
