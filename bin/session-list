@@ -6,9 +6,12 @@ source "$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)/_session
 
 usage() {
   cat <<'EOF'
-Usage: session-list KEY COMMAND [ARGS...]
+Usage: session-list [--shared] KEY COMMAND [ARGS...]
 
 Manage a list stored under KEY. Items are stored newline-separated.
+
+Options:
+  --shared    Operate on shared namespace
 
 Commands:
   add ITEM [ITEM...]       Append items to the list
@@ -31,6 +34,7 @@ Examples:
   session-list all diff done       # items in 'all' not in 'done'
   session-list a intersect b       # items common to both
   session-list a union b           # combined, no duplicates
+  session-list --shared results add "task done"
 EOF
   exit 1
 }
@@ -39,6 +43,9 @@ if [ -z "${CLAUDE_SESSION_DIR:-}" ]; then
   echo "Error: CLAUDE_SESSION_DIR not set. Is the claude-session-store plugin active?" >&2
   exit 1
 fi
+
+parse_shared_flag "$@"
+set -- "${PARSE_ARGS[@]}"
 
 if [ $# -lt 2 ]; then
   usage
@@ -53,7 +60,8 @@ if ! valid_key "$KEY"; then
   exit 1
 fi
 
-FILE="${CLAUDE_SESSION_DIR}/${KEY}"
+STORE_DIR=$(resolve_store_dir)
+FILE="${STORE_DIR}/${KEY}"
 
 # Ensure file exists for commands that read it
 ensure_file() {
@@ -91,8 +99,8 @@ esac
 case "$CMD" in
   add|rm|rm-all|clear)
     if [ "${_SESSION_LOCKED:-}" != "1" ]; then
-      with_lock "${CLAUDE_SESSION_DIR}/.locks/${KEY}" -- \
-        env _SESSION_LOCKED=1 "$0" "$KEY" "$CMD" "$@"
+      with_lock "${STORE_DIR}/.locks/${KEY}" -- \
+        env _SESSION_LOCKED=1 _SESSION_SHARED="${_SESSION_SHARED}" "$0" ${_SESSION_SHARED:+--shared} "$KEY" "$CMD" "$@"
       exit $?
     fi
     ;;
@@ -118,8 +126,8 @@ case "$CMD" in
     ensure_file
     # Temp files live in the hidden .locks dir so a crash can't leave stray
     # files that session-keys would surface as bogus keys; trap cleans them up.
-    mkdir -p "${CLAUDE_SESSION_DIR}/.locks"
-    tmp="${CLAUDE_SESSION_DIR}/.locks/${KEY}.tmp.$$"
+    mkdir -p "${STORE_DIR}/.locks"
+    tmp="${STORE_DIR}/.locks/${KEY}.tmp.$$"
     trap 'rm -f "$tmp" "${tmp}.2"' EXIT
     cp "$FILE" "$tmp"
     for item in "$@"; do
@@ -143,8 +151,8 @@ case "$CMD" in
       exit 1
     fi
     ensure_file
-    mkdir -p "${CLAUDE_SESSION_DIR}/.locks"
-    tmp="${CLAUDE_SESSION_DIR}/.locks/${KEY}.tmp.$$"
+    mkdir -p "${STORE_DIR}/.locks"
+    tmp="${STORE_DIR}/.locks/${KEY}.tmp.$$"
     trap 'rm -f "$tmp" "${tmp}.2"' EXIT
     cp "$FILE" "$tmp"
     for item in "$@"; do
@@ -203,7 +211,7 @@ case "$CMD" in
       echo "Error: Key must be alphanumeric (hyphens and underscores allowed)." >&2
       exit 1
     fi
-    OTHER_FILE="${CLAUDE_SESSION_DIR}/${OTHER_KEY}"
+    OTHER_FILE="${STORE_DIR}/${OTHER_KEY}"
     if [ ! -f "$FILE" ] || [ ! -s "$FILE" ]; then
       exit 0
     fi
@@ -224,7 +232,7 @@ case "$CMD" in
       echo "Error: Key must be alphanumeric (hyphens and underscores allowed)." >&2
       exit 1
     fi
-    OTHER_FILE="${CLAUDE_SESSION_DIR}/${OTHER_KEY}"
+    OTHER_FILE="${STORE_DIR}/${OTHER_KEY}"
     if [ ! -f "$FILE" ] || [ ! -s "$FILE" ]; then
       exit 0
     fi
@@ -244,7 +252,7 @@ case "$CMD" in
       echo "Error: Key must be alphanumeric (hyphens and underscores allowed)." >&2
       exit 1
     fi
-    OTHER_FILE="${CLAUDE_SESSION_DIR}/${OTHER_KEY}"
+    OTHER_FILE="${STORE_DIR}/${OTHER_KEY}"
     {
       if [ -f "$FILE" ] && [ -s "$FILE" ]; then cat "$FILE"; fi
       if [ -f "$OTHER_FILE" ] && [ -s "$OTHER_FILE" ]; then cat "$OTHER_FILE"; fi

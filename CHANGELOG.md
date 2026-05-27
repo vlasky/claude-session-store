@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.1.0 — 2026-05-27
+
+Agent namespace isolation for parallel subagents.
+
+- SubagentStart hook automatically assigns `$CLAUDE_AGENT_NS` to each subagent (from hook `agent_id` or generated UUID).
+- All CLI tools (`session-set`, `session-get`, `session-del`, `session-incr`, `session-decr`, `session-keys`, `session-list`) now support `--shared` flag.
+- Without `--shared` in a subagent: operations go to private namespace (`.ns/<agent-id>/`).
+- With `--shared`: operations go to session root (visible to all agents).
+- Main session behavior is unchanged (no namespace, `--shared` is a no-op).
+- Private namespaces are isolated — one subagent cannot read another's private keys.
+- Shared counter/list operations work across agents (e.g. parallel `session-incr --shared total`).
+
 ## 1.0.0 — 2026-05-26
 
 Initial release.

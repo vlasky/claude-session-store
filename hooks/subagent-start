@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# SubagentStart hook: assigns each subagent a unique namespace ID.
+# The agent_id from the hook input is used directly (already unique per instance).
+# Falls back to uuidgen if agent_id is not available.
+
+if [ -z "${CLAUDE_ENV_FILE:-}" ]; then
+  exit 0
+fi
+
+if [ -z "${CLAUDE_SESSION_DIR:-}" ]; then
+  exit 0
+fi
+
+# Read agent_id from stdin JSON (hook input)
+AGENT_ID=""
+if command -v jq >/dev/null 2>&1; then
+  AGENT_ID=$(jq -r '.agent_id // empty' 2>/dev/null || true)
+fi
+
+# Fallback: generate a short unique ID
+if [ -z "$AGENT_ID" ]; then
+  if command -v uuidgen >/dev/null 2>&1; then
+    AGENT_ID=$(uuidgen)
+  elif [ -f /proc/sys/kernel/random/uuid ]; then
+    AGENT_ID=$(cat /proc/sys/kernel/random/uuid)
+  else
+    AGENT_ID="agent-$$-$(date +%s%N)"
+  fi
+fi
+
+# Create the private namespace directory
+PRIVATE_DIR="${CLAUDE_SESSION_DIR}/.ns/${AGENT_ID}"
+(umask 077; mkdir -p "$PRIVATE_DIR")
+
+# Export the namespace so session-* tools can find it
+printf 'export CLAUDE_AGENT_NS=%q\n' "$AGENT_ID" >> "$CLAUDE_ENV_FILE"

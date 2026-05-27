@@ -12,6 +12,33 @@
 # letters into the range (e.g. valid_key "café" would wrongly pass). The C
 # locale makes the ranges strictly byte-wise ASCII as documented.
 
+# resolve_store_dir — returns the storage directory for the current context.
+# When CLAUDE_AGENT_NS is set (subagent) and _SESSION_SHARED is not "1",
+# uses the private namespace directory. Otherwise uses the shared root.
+resolve_store_dir() {
+  if [ -n "${CLAUDE_AGENT_NS:-}" ] && [ "${_SESSION_SHARED:-}" != "1" ]; then
+    local dir="${CLAUDE_SESSION_DIR}/.ns/${CLAUDE_AGENT_NS}"
+    mkdir -p "$dir"
+    printf '%s' "$dir"
+  else
+    printf '%s' "$CLAUDE_SESSION_DIR"
+  fi
+}
+
+# parse_shared_flag ARGS... — sets _SESSION_SHARED=1 if --shared is present,
+# then removes it from the argument list. Remaining args in PARSE_ARGS array.
+parse_shared_flag() {
+  _SESSION_SHARED=""
+  PARSE_ARGS=()
+  for arg in "$@"; do
+    if [ "$arg" = "--shared" ]; then
+      _SESSION_SHARED="1"
+    else
+      PARSE_ARGS+=("$arg")
+    fi
+  done
+}
+
 # valid_key KEY — true if KEY is non-empty and only [A-Za-z0-9_-].
 valid_key() {
   local LC_ALL=C

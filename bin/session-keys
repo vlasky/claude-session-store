@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# shellcheck source=bin/_session-lock
+source "$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)/_session-lock"
+
 usage() {
-  echo "Usage: session-keys"
+  echo "Usage: session-keys [--shared]"
   echo ""
   echo "List all keys currently stored in the session."
   echo "Outputs one key per line. Empty output if no keys exist."
   echo ""
+  echo "Options:"
+  echo "  --shared    List keys in shared namespace"
+  echo ""
   echo "Examples:"
   echo "  session-keys"
+  echo "  session-keys --shared"
   echo "  session-keys | wc -l"
   exit 1
 }
@@ -18,12 +25,15 @@ if [ -z "${CLAUDE_SESSION_DIR:-}" ]; then
   exit 1
 fi
 
+parse_shared_flag "$@"
+set -- "${PARSE_ARGS[@]}"
+
 if [ "${1:-}" = "--help" ]; then
   usage
 fi
 
-if [ -d "$CLAUDE_SESSION_DIR" ]; then
-  # -exec basename is portable across GNU (Linux) and BSD (macOS) find;
-  # GNU-only -printf '%f' is avoided so this works on both.
-  find "$CLAUDE_SESSION_DIR" -maxdepth 1 -type f -exec basename {} \; | sort
+STORE_DIR=$(resolve_store_dir)
+
+if [ -d "$STORE_DIR" ]; then
+  find "$STORE_DIR" -maxdepth 1 -type f -exec basename {} \; | sort
 fi

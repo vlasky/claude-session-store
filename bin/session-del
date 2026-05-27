@@ -5,13 +5,17 @@ set -euo pipefail
 source "$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)/_session-lock"
 
 usage() {
-  echo "Usage: session-del KEY"
+  echo "Usage: session-del [--shared] KEY"
   echo ""
   echo "Delete a key from the session store."
   echo "No error if the key doesn't exist."
   echo ""
+  echo "Options:"
+  echo "  --shared    Delete from shared namespace"
+  echo ""
   echo "Examples:"
   echo "  session-del deck"
+  echo "  session-del --shared results"
   exit 1
 }
 
@@ -19,6 +23,9 @@ if [ -z "${CLAUDE_SESSION_DIR:-}" ]; then
   echo "Error: CLAUDE_SESSION_DIR not set. Is the claude-session-store plugin active?" >&2
   exit 1
 fi
+
+parse_shared_flag "$@"
+set -- "${PARSE_ARGS[@]}"
 
 if [ $# -lt 1 ]; then
   usage
@@ -31,11 +38,12 @@ if ! valid_key "$KEY"; then
   exit 1
 fi
 
-FILE="${CLAUDE_SESSION_DIR}/${KEY}"
+STORE_DIR=$(resolve_store_dir)
+FILE="${STORE_DIR}/${KEY}"
 
 # Serialize against concurrent writers to the same key (incr/decr/list/set).
 if [ "${_SESSION_LOCKED:-}" != "1" ]; then
-  with_lock "${CLAUDE_SESSION_DIR}/.locks/${KEY}" -- env _SESSION_LOCKED=1 "$0" "$@"
+  with_lock "${STORE_DIR}/.locks/${KEY}" -- env _SESSION_LOCKED=1 _SESSION_SHARED="${_SESSION_SHARED}" "$0" ${_SESSION_SHARED:+--shared} "$KEY"
   exit $?
 fi
 
