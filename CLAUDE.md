@@ -5,9 +5,9 @@ Session-scoped scratch storage for Claude Code plugins. Provides `$CLAUDE_SESSIO
 ## How it works
 
 1. **SessionStart hook** creates `/tmp/claude-session-<SESSION_ID>` and exports `$CLAUDE_SESSION_DIR` via `CLAUDE_ENV_FILE`.
-2. **SubagentStart hook** assigns each subagent a unique `$CLAUDE_AGENT_NS`, providing automatic private namespacing.
+2. **SubagentStart hook** gives each subagent a private dir: creates `<root>/.ns/<agent-id>/`, exports `$CLAUDE_SESSION_ROOT` (the shared root), exports `$CLAUDE_AGENT_NS` (the agent id), and overrides `$CLAUDE_SESSION_DIR` to point at the private dir.
 3. **During the session**, any tool can read/write files in that directory — either directly or via the `session-set`/`session-get` CLI tools.
-4. **SessionEnd hook** receives the `session_id` via stdin JSON and `rm -rf`s the directory.
+4. **SessionEnd hook** receives the `session_id` via stdin JSON and `rm -rf`s the entire session directory (including all private namespaces).
 
 ## CLI tools (added to PATH)
 
@@ -26,11 +26,23 @@ session-list [--shared] KEY COMMAND ...   Manage ordered lists (add, rm, rm-all,
 
 ## Agent namespacing
 
-Subagents automatically get private storage via `$CLAUDE_AGENT_NS` (set by SubagentStart hook):
+Subagents automatically get private storage via the SubagentStart hook, which **repoints `$CLAUDE_SESSION_DIR` at the agent's private dir** and exports `$CLAUDE_SESSION_ROOT` for shared access:
 
-- **Without `--shared`** in a subagent: reads/writes go to `.ns/<agent-id>/` (private)
-- **With `--shared`** in a subagent: reads/writes go to the session root (shared)
-- **In the main session**: everything goes to the root (no namespace). `--shared` is a no-op.
+- **Without `--shared`** in a subagent: CLI reads/writes go to `$CLAUDE_SESSION_DIR` (= `.ns/<agent-id>/`, private). Direct file access through `$CLAUDE_SESSION_DIR` lands in the same place — the CLI default and direct access agree.
+- **With `--shared`** in a subagent: CLI reads/writes go to `$CLAUDE_SESSION_ROOT` (shared root, visible to all agents).
+- **In the main session**: `$CLAUDE_SESSION_DIR` is the shared root and `$CLAUDE_SESSION_ROOT` is unset. `--shared` is accepted but has no effect.
+
+The `--shared` flag must precede the key. Once a positional argument appears, option parsing stops, so values starting with `--` round-trip naturally:
+
+```
+session-set --shared mykey --some-literal-value   # value is --some-literal-value
+```
+
+If the **key itself** would start with `--`, use `--` in the leading position to terminate option parsing (POSIX convention):
+
+```
+session-set --shared -- --weird-key --some-value
+```
 
 ## Plugin structure
 
@@ -57,7 +69,8 @@ Then run `/reload-plugins` inside your session to apply.
 ## Design decisions
 
 - **Keyed to `CLAUDE_CODE_SESSION_ID`** — undocumented but stable env var. Fallback: the plugin could generate its own UUID, but the session ID is simpler and directly corresponds to the SessionEnd hook's stdin `session_id` field.
-- **Automatic agent namespacing** — SubagentStart hook injects `CLAUDE_AGENT_NS` (from the hook's `agent_id` field or a generated UUID). Tools route to `.ns/<id>/` when set. No manual namespace management required.
-- **Shared + private model** — subagents default to private storage; `--shared` flag accesses the session root. Main session is always shared (backward-compatible).
+- **Subagent namespacing by env override, not by CLI logic** — SubagentStart points `$CLAUDE_SESSION_DIR` at the private dir and exposes the shared root as `$CLAUDE_SESSION_ROOT`. CLI tools just read one of those two vars; they never interpolate `agent_id` into a path. This means direct file access (`echo > $CLAUDE_SESSION_DIR/foo`) and `session-set foo` end up in the same namespace, eliminating the silent-bypass footgun.
+- **`agent_id` is path-validated at the hook** — sanitized against `[A-Za-z0-9_-]+`; anything else triggers the UUID fallback. Closes the `..`-in-`agent_id` traversal vector.
+- **Leading-only `--shared` + `--` terminator** — mid-arg `--shared` is treated as a positional, so `session-list deck add a --shared b` doesn't silently switch namespaces. To store the literal value `--shared`, just put it in value position: `session-set --shared key --shared` (parsing stops at the first positional). Use a leading `--` only when the key itself starts with `--`.
 - **Plain files in /tmp** — no database, no dependencies. Fast, portable, trivially debuggable.
-- **No permissions model** — all tools in the session can access shared namespace. Private namespaces provide isolation, not security.
+- **No permissions model** — all tools in the session can access the shared root. Private namespaces provide isolation, not security.

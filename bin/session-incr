@@ -4,12 +4,7 @@ set -euo pipefail
 # shellcheck source=bin/_session-lock
 source "$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)/_session-lock"
 
-if [ -z "${CLAUDE_SESSION_DIR:-}" ]; then
-  echo "Error: CLAUDE_SESSION_DIR not set. Is the claude-session-store plugin active?" >&2
-  exit 1
-fi
-
-if [ $# -lt 1 ] || [ "${1:-}" = "--help" ]; then
+usage() {
   echo "Usage: session-incr [--shared] KEY [AMOUNT]"
   echo ""
   echo "Increment a numeric key by AMOUNT (default: 1)."
@@ -19,10 +14,25 @@ if [ $# -lt 1 ] || [ "${1:-}" = "--help" ]; then
   echo "Options:"
   echo "  --shared    Operate on shared namespace"
   exit 1
+}
+
+if [ -z "${CLAUDE_SESSION_DIR:-}" ]; then
+  echo "Error: CLAUDE_SESSION_DIR not set. Is the claude-session-store plugin active?" >&2
+  exit 1
+fi
+
+if [ "${1:-}" = "--help" ]; then
+  usage
 fi
 
 parse_shared_flag "$@"
-set -- "${PARSE_ARGS[@]}"
+set -- ${PARSE_ARGS[@]+"${PARSE_ARGS[@]}"}
+
+# Re-check arity after stripping --shared; `session-incr --shared` alone
+# leaves no positionals and would otherwise crash on $1 under `set -u`.
+if [ $# -lt 1 ]; then
+  usage
+fi
 
 KEY="$1"
 AMOUNT="${2:-1}"
@@ -44,7 +54,7 @@ FILE="${STORE_DIR}/${KEY}"
 # subagents incrementing the same key). Re-exec under the key's lock so the
 # locked worker runs identically whether with_lock uses flock(1) or perl.
 if [ "${_SESSION_LOCKED:-}" != "1" ]; then
-  with_lock "${STORE_DIR}/.locks/${KEY}" -- env _SESSION_LOCKED=1 _SESSION_SHARED="${_SESSION_SHARED}" "$0" ${_SESSION_SHARED:+--shared} "$KEY" "$AMOUNT"
+  with_lock "${STORE_DIR}/.locks/${KEY}" -- env _SESSION_LOCKED=1 _SESSION_SHARED="${_SESSION_SHARED}" "$0" ${_SESSION_SHARED:+--shared} -- "$KEY" "$AMOUNT"
   exit $?
 fi
 

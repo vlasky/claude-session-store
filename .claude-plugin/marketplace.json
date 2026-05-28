@@ -1,6 +1,7 @@
 {
   "name": "claude-session-store",
   "version": "1.0.0",
+  "description": "Session-scoped scratch storage plugin for Claude Code: a temp directory and CLI tools (session-set/-get/-list/...) with automatic per-subagent namespacing.",
   "owner": {
     "name": "vlasky"
   },

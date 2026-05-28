@@ -1,5 +1,5 @@
 {
-  "description": "Session-scoped scratch storage lifecycle: create temp dir on start, clean up on end.",
+  "description": "Session-scoped scratch storage lifecycle: create temp dir on start, isolate subagents, clean up on end.",
   "hooks": {
     "SessionStart": [
       {
@@ -7,6 +7,16 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-start"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/subagent-start"
           }
         ]
       }

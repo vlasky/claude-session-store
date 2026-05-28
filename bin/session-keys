@@ -26,7 +26,7 @@ if [ -z "${CLAUDE_SESSION_DIR:-}" ]; then
 fi
 
 parse_shared_flag "$@"
-set -- "${PARSE_ARGS[@]}"
+set -- ${PARSE_ARGS[@]+"${PARSE_ARGS[@]}"}
 
 if [ "${1:-}" = "--help" ]; then
   usage
