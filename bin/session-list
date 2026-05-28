@@ -45,7 +45,7 @@ if [ -z "${CLAUDE_SESSION_DIR:-}" ]; then
 fi
 
 parse_shared_flag "$@"
-set -- "${PARSE_ARGS[@]}"
+set -- ${PARSE_ARGS[@]+"${PARSE_ARGS[@]}"}
 
 if [ $# -lt 2 ]; then
   usage
@@ -100,7 +100,7 @@ case "$CMD" in
   add|rm|rm-all|clear)
     if [ "${_SESSION_LOCKED:-}" != "1" ]; then
       with_lock "${STORE_DIR}/.locks/${KEY}" -- \
-        env _SESSION_LOCKED=1 _SESSION_SHARED="${_SESSION_SHARED}" "$0" ${_SESSION_SHARED:+--shared} "$KEY" "$CMD" "$@"
+        env _SESSION_LOCKED=1 _SESSION_SHARED="${_SESSION_SHARED}" "$0" ${_SESSION_SHARED:+--shared} -- "$KEY" "$CMD" "$@"
       exit $?
     fi
     ;;

@@ -12,30 +12,51 @@
 # letters into the range (e.g. valid_key "café" would wrongly pass). The C
 # locale makes the ranges strictly byte-wise ASCII as documented.
 
-# resolve_store_dir — returns the storage directory for the current context.
-# When CLAUDE_AGENT_NS is set (subagent) and _SESSION_SHARED is not "1",
-# uses the private namespace directory. Otherwise uses the shared root.
+# resolve_store_dir — returns the storage directory for the current command.
+#   --shared  → the shared session root ($CLAUDE_SESSION_ROOT in subagents,
+#               $CLAUDE_SESSION_DIR in the main session where ROOT is unset).
+#   default   → $CLAUDE_SESSION_DIR. In subagents this already points at the
+#               private namespace dir (SubagentStart has overridden it); in
+#               the main session it points at the shared root.
+#
+# This means direct file writes through $CLAUDE_SESSION_DIR and CLI writes
+# without --shared land in the same place, removing the silent footgun where
+# direct access bypassed namespacing.
 resolve_store_dir() {
-  if [ -n "${CLAUDE_AGENT_NS:-}" ] && [ "${_SESSION_SHARED:-}" != "1" ]; then
-    local dir="${CLAUDE_SESSION_DIR}/.ns/${CLAUDE_AGENT_NS}"
-    mkdir -p "$dir"
-    printf '%s' "$dir"
+  if [ "${_SESSION_SHARED:-}" = "1" ]; then
+    printf '%s' "${CLAUDE_SESSION_ROOT:-$CLAUDE_SESSION_DIR}"
   else
     printf '%s' "$CLAUDE_SESSION_DIR"
   fi
 }
 
-# parse_shared_flag ARGS... — sets _SESSION_SHARED=1 if --shared is present,
-# then removes it from the argument list. Remaining args in PARSE_ARGS array.
+# parse_shared_flag ARGS... — consumes leading --shared flags and an optional
+# `--` end-of-options marker. Sets _SESSION_SHARED=1 if --shared was seen and
+# leaves the remaining arguments in PARSE_ARGS. Anything past the first
+# positional (or past `--`) is left untouched, so values like '--shared' can
+# still be stored/listed: `session-set --shared key --shared` works because
+# parsing stops at the first positional, and `session-set -- key --shared` is
+# the explicit form (terminator before the key).
+#
+# The previous version stripped --shared from any position, which silently
+# redirected `session-list deck add a --shared b` to the shared namespace.
 parse_shared_flag() {
   _SESSION_SHARED=""
   PARSE_ARGS=()
+  local end_of_flags=0 arg
   for arg in "$@"; do
-    if [ "$arg" = "--shared" ]; then
-      _SESSION_SHARED="1"
-    else
-      PARSE_ARGS+=("$arg")
+    if [ "$end_of_flags" = "0" ]; then
+      if [ "$arg" = "--shared" ]; then
+        _SESSION_SHARED="1"
+        continue
+      elif [ "$arg" = "--" ]; then
+        end_of_flags=1
+        continue
+      else
+        end_of_flags=1
+      fi
     fi
+    PARSE_ARGS+=("$arg")
   done
 }
 

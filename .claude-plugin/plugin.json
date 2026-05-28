@@ -5,13 +5,5 @@
   "author": {
     "name": "Vlad Lasky"
   },
-  "skills": ["./skills/session"],
-  "hooks": {
-    "SubagentStart": [
-      {
-        "type": "command",
-        "command": "./hooks/subagent-start"
-      }
-    ]
-  }
+  "skills": ["./skills/session"]
 }

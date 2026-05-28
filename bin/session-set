@@ -31,7 +31,10 @@ if [ -z "${CLAUDE_SESSION_DIR:-}" ]; then
 fi
 
 parse_shared_flag "$@"
-set -- "${PARSE_ARGS[@]}"
+# ${PARSE_ARGS[@]+...} is the bash-3.2-safe form of "expand if set"; the
+# bare "${PARSE_ARGS[@]}" errors under `set -u` when the array is empty,
+# and macOS ships bash 3.2.
+set -- ${PARSE_ARGS[@]+"${PARSE_ARGS[@]}"}
 
 if [ $# -lt 2 ]; then
   usage
@@ -49,8 +52,9 @@ STORE_DIR=$(resolve_store_dir)
 
 # Serialize against concurrent writers to the same key (incr/decr/list).
 # Re-exec under the key's lock; stdin (for VALUE=-) is inherited by the worker.
+# `--` terminates option parsing so VALUE='--shared' (or KEY='--') round-trips.
 if [ "${_SESSION_LOCKED:-}" != "1" ]; then
-  with_lock "${STORE_DIR}/.locks/${KEY}" -- env _SESSION_LOCKED=1 _SESSION_SHARED="${_SESSION_SHARED}" "$0" ${_SESSION_SHARED:+--shared} "$KEY" "$VALUE"
+  with_lock "${STORE_DIR}/.locks/${KEY}" -- env _SESSION_LOCKED=1 _SESSION_SHARED="${_SESSION_SHARED}" "$0" ${_SESSION_SHARED:+--shared} -- "$KEY" "$VALUE"
   exit $?
 fi
 

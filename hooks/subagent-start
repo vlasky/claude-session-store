@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# SubagentStart hook: assigns each subagent a unique namespace ID.
-# The agent_id from the hook input is used directly (already unique per instance).
-# Falls back to uuidgen if agent_id is not available.
+# SubagentStart hook: gives each subagent a private scratch dir.
+#
+# Effect on the subagent's environment:
+#   CLAUDE_SESSION_ROOT = the original session root (where shared keys live)
+#   CLAUDE_AGENT_NS     = this subagent's id (marker; not used for path resolution)
+#   CLAUDE_SESSION_DIR  = the subagent's private dir, $ROOT/.ns/<id>
+#
+# Direct file writes through $CLAUDE_SESSION_DIR therefore land in the private
+# namespace by default; the shared root remains reachable via $CLAUDE_SESSION_ROOT.
 
 if [ -z "${CLAUDE_ENV_FILE:-}" ]; then
   exit 0
@@ -13,13 +19,17 @@ if [ -z "${CLAUDE_SESSION_DIR:-}" ]; then
   exit 0
 fi
 
-# Read agent_id from stdin JSON (hook input)
+# Read agent_id from stdin JSON (the hook input). Treat unsafe or missing
+# values as empty so the fallback generator runs — never let the hook input
+# dictate a filesystem path.
 AGENT_ID=""
 if command -v jq >/dev/null 2>&1; then
   AGENT_ID=$(jq -r '.agent_id // empty' 2>/dev/null || true)
 fi
+case "$AGENT_ID" in
+  '' | *[!a-zA-Z0-9_-]* ) AGENT_ID="" ;;
+esac
 
-# Fallback: generate a short unique ID
 if [ -z "$AGENT_ID" ]; then
   if command -v uuidgen >/dev/null 2>&1; then
     AGENT_ID=$(uuidgen)
@@ -30,9 +40,30 @@ if [ -z "$AGENT_ID" ]; then
   fi
 fi
 
-# Create the private namespace directory
-PRIVATE_DIR="${CLAUDE_SESSION_DIR}/.ns/${AGENT_ID}"
+# Final safety check. Every code path above produces ASCII [A-Za-z0-9_-];
+# refuse rather than silently writing through an odd path if that ever changes.
+case "$AGENT_ID" in
+  '' | *[!a-zA-Z0-9_-]* )
+    echo "claude-session-store: refusing to use unsafe agent id" >&2
+    exit 1
+    ;;
+esac
+
+# A nested subagent inherits its parent's env, so $CLAUDE_SESSION_DIR is
+# already the parent's private dir and $CLAUDE_SESSION_ROOT (if set) holds the
+# real session root. Always anchor under the real root so siblings live at the
+# same level, not nested inside each other, and so --shared keeps reaching the
+# real shared root rather than the parent's private dir.
+ROOT="${CLAUDE_SESSION_ROOT:-$CLAUDE_SESSION_DIR}"
+
+PRIVATE_DIR="${ROOT}/.ns/${AGENT_ID}"
 (umask 077; mkdir -p "$PRIVATE_DIR")
 
-# Export the namespace so session-* tools can find it
-printf 'export CLAUDE_AGENT_NS=%q\n' "$AGENT_ID" >> "$CLAUDE_ENV_FILE"
+# Emit env in this order so sourcing applies them correctly: capture the
+# root first, then mark the namespace, then override CLAUDE_SESSION_DIR.
+# %q shell-quotes the values so the sourced env file can't be corrupted.
+{
+  printf 'export CLAUDE_SESSION_ROOT=%q\n' "$ROOT"
+  printf 'export CLAUDE_AGENT_NS=%q\n' "$AGENT_ID"
+  printf 'export CLAUDE_SESSION_DIR=%q\n' "$PRIVATE_DIR"
+} >> "$CLAUDE_ENV_FILE"

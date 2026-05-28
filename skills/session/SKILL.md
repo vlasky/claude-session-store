@@ -82,35 +82,48 @@ session-list tested union all      # → auth\nbilling\nendpoints\nhealth\nusers
 
 ## Direct file access
 
-You can also read/write files directly in `$CLAUDE_SESSION_DIR`:
+You can also read/write files directly via the environment variables:
 
 ```bash
-echo "data" > "$CLAUDE_SESSION_DIR/myfile"
-cat "$CLAUDE_SESSION_DIR/myfile"
+echo "data" > "$CLAUDE_SESSION_DIR/myfile"           # default namespace
+echo "shared" > "$CLAUDE_SESSION_ROOT/myfile"        # shared root (subagent only)
 ```
+
+In the main session, `$CLAUDE_SESSION_DIR` points at the session root.
+In a subagent, `$CLAUDE_SESSION_DIR` points at the agent's private dir, and
+`$CLAUDE_SESSION_ROOT` points at the shared root. This matches the CLI default:
+writing through `$CLAUDE_SESSION_DIR` lands in the same place as `session-set`
+without `--shared`.
 
 ## Agent Namespacing
 
-When running inside a subagent, `$CLAUDE_AGENT_NS` is set automatically (via SubagentStart hook). This provides automatic namespace isolation:
+When running inside a subagent, the SubagentStart hook automatically:
+
+- Sets `$CLAUDE_AGENT_NS` to a unique agent id (marker).
+- Points `$CLAUDE_SESSION_DIR` at the agent's private dir (`<root>/.ns/<id>`).
+- Exports `$CLAUDE_SESSION_ROOT` with the original shared root.
+
+So:
 
 - **Without `--shared`** — reads/writes go to the agent's private namespace. Other agents cannot see these keys.
-- **With `--shared`** — reads/writes go to the shared namespace (same as the main session's root). All agents can access shared keys.
-- **In the main session** (no subagent) — everything goes to the shared namespace. `--shared` is accepted but has no effect.
+- **With `--shared`** — reads/writes go to the shared root. All agents (and the main session) can access shared keys.
+- **In the main session** (no subagent) — `$CLAUDE_SESSION_DIR` is the shared root; `--shared` is accepted but has no effect. `$CLAUDE_SESSION_ROOT` is unset.
 
 **Example — parallel simulations:**
 ```bash
-# Parent sets shared config
+# Parent (main session) sets shared config
 session-set --shared config '{"iterations": 100}'
 
-# Each subagent (CLAUDE_AGENT_NS set automatically):
-CONFIG=$(session-get --shared config)   # read parent's config
-session-incr progress                    # private counter
-session-set result "42.5"                # private result
+# Each subagent (env set automatically by the hook):
+CONFIG=$(session-get --shared config)        # read parent's config
+session-incr progress                         # private counter
+session-set --shared "result-$CLAUDE_AGENT_NS" "42.5"  # publish to shared
 
-# Parent collects results by reading shared keys written by subagents
+# Parent collects results by listing shared keys written by subagents
+session-keys --shared | grep '^result-'
 ```
 
-**When spawning parallel subagents that need isolated state, no manual namespace management is needed.** Each subagent automatically gets its own private area. Use `--shared` only when you intentionally want cross-agent visibility.
+**When spawning parallel subagents that need isolated state, no manual namespace management is needed.** Each subagent automatically gets its own private area. Use `--shared` only when you intentionally want cross-agent visibility — and use a unique key (e.g. `result-$CLAUDE_AGENT_NS`) to avoid clobbering siblings.
 
 ## Rules
 
@@ -120,4 +133,5 @@ session-set result "42.5"                # private result
 4. **Don't store secrets.** The directory lives in `/tmp` and is world-readable.
 5. **Check before assuming.** Use `session-get` and check the exit code before using a value that may not exist yet.
 6. **Never compute complements manually.** When tracking a subset drawn from a known universe (deck, pool, roster), initialize the full collection with `add` first, then use `rm` to remove items as they're selected. Do not mentally subtract and type out the remainder — that's error-prone.
-7. **In subagents, use `--shared` to communicate with the parent.** Write results to shared keys so the parent (or other agents) can read them.
+7. **In subagents, use `--shared` to communicate with the parent.** Write results to shared keys so the parent (or other agents) can read them. Pick a unique key per agent (e.g. `result-$CLAUDE_AGENT_NS`) so parallel agents don't overwrite each other.
+8. **The `--shared` flag must come before the key.** `session-set foo --shared` stores `--shared` as the value of `foo`, not as an option. Use `session-set --shared foo VALUE` instead. To store a literal `--shared` as a key or value, use `--` to end option parsing in the leading position: `session-set --shared -- mykey --shared`.
