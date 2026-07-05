@@ -30,31 +30,42 @@ resolve_store_dir() {
   fi
 }
 
-# parse_shared_flag ARGS... — consumes leading --shared flags and an optional
-# `--` end-of-options marker. Sets _SESSION_SHARED=1 if --shared was seen and
-# leaves the remaining arguments in PARSE_ARGS. Anything past the first
-# positional (or past `--`) is left untouched, so values like '--shared' can
-# still be stored/listed: `session-set --shared key --shared` works because
-# parsing stops at the first positional, and `session-set -- key --shared` is
-# the explicit form (terminator before the key).
+# parse_shared_flag ARGS... — consumes leading --shared / --help / -h flags and
+# an optional `--` end-of-options marker. Sets _SESSION_SHARED=1 if --shared was
+# seen, _SESSION_HELP=1 if --help/-h was seen, and leaves the remaining
+# arguments in PARSE_ARGS. Anything past the first positional (or past `--`) is
+# left untouched, so values like '--shared' can still be stored/listed:
+# `session-set --shared key --shared` works because parsing stops at the first
+# positional, and `session-set -- key --shared` is the explicit form
+# (terminator before the key). A literal key `--help` needs the same escape:
+# `session-get -- --help`.
 #
 # The previous version stripped --shared from any position, which silently
 # redirected `session-list deck add a --shared b` to the shared namespace.
 parse_shared_flag() {
   _SESSION_SHARED=""
+  _SESSION_HELP=""
   PARSE_ARGS=()
   local end_of_flags=0 arg
   for arg in "$@"; do
     if [ "$end_of_flags" = "0" ]; then
-      if [ "$arg" = "--shared" ]; then
-        _SESSION_SHARED="1"
-        continue
-      elif [ "$arg" = "--" ]; then
-        end_of_flags=1
-        continue
-      else
-        end_of_flags=1
-      fi
+      case "$arg" in
+        --shared)
+          _SESSION_SHARED="1"
+          continue
+          ;;
+        --help|-h)
+          _SESSION_HELP="1"
+          continue
+          ;;
+        --)
+          end_of_flags=1
+          continue
+          ;;
+        *)
+          end_of_flags=1
+          ;;
+      esac
     fi
     PARSE_ARGS+=("$arg")
   done
@@ -90,6 +101,23 @@ valid_item() {
   return 0
 }
 
+# atomic_write FILE — write stdin to FILE atomically (temp file + rename).
+# A plain `> FILE` redirect truncates in place, so a lock-free reader
+# (session-get) that lands between the truncate and the write sees an empty or
+# partial value. rename(2) is atomic on the same filesystem, so readers always
+# see either the old value or the new one, never a torn state. The temp file
+# lives in the hidden .locks dir so a crash can't leave a stray file that
+# session-keys would surface as a bogus key; the session dir is removed at
+# SessionEnd, so an orphaned temp never outlives the session either.
+atomic_write() {
+  local file=$1 dir tmp
+  dir=$(dirname "$file")
+  mkdir -p "${dir}/.locks"
+  tmp="${dir}/.locks/$(basename "$file").aw.$$"
+  cat > "$tmp"
+  mv "$tmp" "$file"
+}
+
 # to_int10 VALUE — print VALUE as a normalized base-10 integer (handles sign and
 # leading zeros). Assumes VALUE already passed valid_int. Uses bash arithmetic
 # (exact across the int64 range) rather than awk, whose float math loses
@@ -110,6 +138,8 @@ to_int10() {
 #
 # Fast path: flock(1) (util-linux) when available. Fallback: perl's flock(2),
 # which is present on macOS (/usr/bin/perl) and virtually all Linux systems.
+# Set SESSION_STORE_NO_FLOCK=1 to force the perl path (used by the test suite
+# to exercise both implementations on systems that have flock).
 
 with_lock() {
   local lockfile="$1"
@@ -118,12 +148,14 @@ with_lock() {
 
   mkdir -p "$(dirname "$lockfile")"
 
-  if command -v flock >/dev/null 2>&1; then
+  if [ "${SESSION_STORE_NO_FLOCK:-}" != "1" ] && command -v flock >/dev/null 2>&1; then
     # Hold the lock on fd 9 for the duration of the command, then close it.
+    # `|| rc=$?` keeps a failing command from tripping `set -e` before the
+    # status is captured; the fd close and return then run on both paths.
+    local rc=0
     exec 9>"$lockfile"
     flock 9
-    "$@"
-    local rc=$?
+    "$@" || rc=$?
     exec 9>&-
     return $rc
   fi

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # shellcheck source=bin/_session-lock
-source "$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)/_session-lock"
+source "$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)/_session-lock"
 
 usage() {
   echo "Usage: session-keys [--shared]"
@@ -17,19 +17,20 @@ usage() {
   echo "  session-keys"
   echo "  session-keys --shared"
   echo "  session-keys | wc -l"
-  exit 1
+  exit "${1:-1}"
 }
-
-if [ -z "${CLAUDE_SESSION_DIR:-}" ]; then
-  echo "Error: CLAUDE_SESSION_DIR not set. Is the claude-session-store plugin active?" >&2
-  exit 1
-fi
 
 parse_shared_flag "$@"
 set -- ${PARSE_ARGS[@]+"${PARSE_ARGS[@]}"}
 
-if [ "${1:-}" = "--help" ]; then
-  usage
+# Help must work even when the plugin env isn't active, so check it first.
+if [ "${_SESSION_HELP}" = "1" ]; then
+  usage 0
+fi
+
+if [ -z "${CLAUDE_SESSION_DIR:-}" ]; then
+  echo "Error: CLAUDE_SESSION_DIR not set. Is the claude-session-store plugin active?" >&2
+  exit 1
 fi
 
 STORE_DIR=$(resolve_store_dir)

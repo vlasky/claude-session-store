@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # shellcheck source=bin/_session-lock
-source "$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)/_session-lock"
+source "$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)/_session-lock"
 
 usage() {
   echo "Usage: session-decr [--shared] KEY [AMOUNT]"
@@ -13,20 +13,21 @@ usage() {
   echo ""
   echo "Options:"
   echo "  --shared    Operate on shared namespace"
-  exit 1
+  exit "${1:-1}"
 }
+
+parse_shared_flag "$@"
+set -- ${PARSE_ARGS[@]+"${PARSE_ARGS[@]}"}
+
+# Help must work even when the plugin env isn't active, so check it first.
+if [ "${_SESSION_HELP}" = "1" ]; then
+  usage 0
+fi
 
 if [ -z "${CLAUDE_SESSION_DIR:-}" ]; then
   echo "Error: CLAUDE_SESSION_DIR not set. Is the claude-session-store plugin active?" >&2
   exit 1
 fi
-
-if [ "${1:-}" = "--help" ]; then
-  usage
-fi
-
-parse_shared_flag "$@"
-set -- ${PARSE_ARGS[@]+"${PARSE_ARGS[@]}"}
 
 if [ $# -lt 1 ]; then
   usage
@@ -69,5 +70,6 @@ fi
 # Normalize operands to base 10 (handles leading zeros / signs) and subtract
 # with bash int64 arithmetic, which is exact — unlike awk's float math.
 NEW=$(( $(to_int10 "$CURRENT") - $(to_int10 "$AMOUNT") ))
-printf '%s\n' "$NEW" > "$FILE"
+# atomic_write (temp + rename) so lock-free readers never see a torn value.
+printf '%s\n' "$NEW" | atomic_write "$FILE"
 echo "$NEW"
