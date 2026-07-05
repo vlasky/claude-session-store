@@ -39,6 +39,7 @@ All commands accept an optional `--shared` flag to operate on the shared namespa
 | `session-list KEY rm ITEM [ITEM...]` | Remove first occurrence of each item |
 | `session-list KEY rm-all ITEM [ITEM...]` | Remove all occurrences of each item |
 | `session-list KEY has ITEM` | Exit 0 if item exists, 1 otherwise |
+| `session-list KEY pop` | Print and remove the first item atomically (exit 1 if empty) |
 | `session-list KEY count` | Print number of items |
 | `session-list KEY show` | Print all items (one per line) |
 | `session-list KEY clear` | Remove all items (deletes the key) |
@@ -64,10 +65,25 @@ session-list drawn show        # → J♠\n9♠\nK♠
 **Example — task queue:**
 ```bash
 session-list todo add "fix tests" "update docs" "deploy"
-session-list todo rm "fix tests"
-session-list done add "fix tests"
-session-list todo count  # → 2
-session-list todo diff done   # → "update docs"\n"deploy"
+task=$(session-list todo pop)    # → "fix tests" (removed from todo atomically)
+session-list done add "$task"
+session-list todo count          # → 2
+session-list todo diff done      # → "update docs"\n"deploy"
+```
+
+**Example — shared work queue for parallel subagents.** `pop` takes the per-key
+lock, so two agents can never receive the same item. Prefer it over
+`show`-then-`rm`, which has a race window:
+
+```bash
+# Parent seeds the queue:
+session-list --shared queue add task-1 task-2 task-3 task-4
+
+# Each parallel subagent drains it:
+while item=$(session-list --shared queue pop); do
+  # ... process "$item" ...
+  session-list --shared done-list add "$item"
+done
 ```
 
 **Example — set operations:**
@@ -130,8 +146,9 @@ session-keys --shared | grep '^result-'
 1. **Use this for state that only matters within the current session** — game state, running totals, intermediate results, deck tracking, etc.
 2. **Keys are flat** — alphanumeric, hyphens, underscores only. No subdirectories via the CLI tools (but you can mkdir inside `$CLAUDE_SESSION_DIR` directly if needed).
 3. **Values are plain text.** For structured data, store JSON and parse with `jq`.
-4. **Don't store secrets.** The directory lives in `/tmp` and is world-readable.
+4. **Don't store secrets.** The directory is 0700 in the system temp dir, but every tool in the session can read it and it offers no isolation guarantees beyond that.
 5. **Check before assuming.** Use `session-get` and check the exit code before using a value that may not exist yet.
 6. **Never compute complements manually.** When tracking a subset drawn from a known universe (deck, pool, roster), initialize the full collection with `add` first, then use `rm` to remove items as they're selected. Do not mentally subtract and type out the remainder — that's error-prone.
 7. **In subagents, use `--shared` to communicate with the parent.** Write results to shared keys so the parent (or other agents) can read them. Pick a unique key per agent (e.g. `result-$CLAUDE_AGENT_NS`) so parallel agents don't overwrite each other.
 8. **The `--shared` flag must come before the key.** `session-set foo --shared` stores `--shared` as the value of `foo`, not as an option. Use `session-set --shared foo VALUE` instead. To store a literal `--shared` as a key or value, use `--` to end option parsing in the leading position: `session-set --shared -- mykey --shared`.
+9. **Distribute work with `pop`, not `show` + `rm`.** When parallel agents consume from a shared list, `session-list --shared KEY pop` removes and returns the head atomically; reading the list and then removing an item is a race where two agents grab the same task.

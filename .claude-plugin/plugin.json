@@ -1,6 +1,6 @@
 {
   "name": "claude-session-store",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Session-scoped scratch storage for Claude Code. Provides $CLAUDE_SESSION_DIR — a temp directory any tool can read/write, automatically cleaned up on session end.",
   "author": {
     "name": "Vlad Lasky"

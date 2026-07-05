@@ -41,6 +41,21 @@ session-list deck has 4♠       # → exit 0
 session-list deck clear
 ```
 
+### Work queues
+
+`pop` prints and removes the first item atomically (under the key's lock), so
+parallel consumers never receive the same item. It exits 1 when the list is
+empty, which terminates a `while` loop cleanly:
+
+```bash
+session-list --shared queue add task-1 task-2 task-3
+
+# In each parallel worker:
+while item=$(session-list --shared queue pop); do
+  process "$item"
+done
+```
+
 ### Set Operations
 
 ```bash
@@ -89,19 +104,45 @@ two are unset; `--shared` is accepted but has no effect.
 
 ## How it works
 
-1. **SessionStart** hook creates `/tmp/claude-session-<SESSION_ID>` and exports `$CLAUDE_SESSION_DIR` via `CLAUDE_ENV_FILE`.
+1. **SessionStart** hook creates `${TMPDIR:-/tmp}/claude-session-<SESSION_ID>` (mode 0700, re-asserted on every start), exports `$CLAUDE_SESSION_DIR` via `CLAUDE_ENV_FILE`, and puts the plugin's `bin/` on `PATH`. It also sweeps this user's session dirs in which nothing has been modified for 7 days, so dirs orphaned by a crash (where SessionEnd never fired) don't accumulate; a long-running session that writes any key stays safe.
 2. **SubagentStart** hook (when a subagent is spawned) creates a per-agent private dir at `<root>/.ns/<agent-id>/`, then exports `$CLAUDE_SESSION_ROOT` (the shared root) and overrides `$CLAUDE_SESSION_DIR` to point at the private dir.
 3. **During the session**, any tool can read/write files in that directory. The `session-*` CLI tools accept `--shared` (as a leading flag) to write to the shared root from within a subagent.
 4. **SessionEnd** hook removes the entire session directory (including all private namespaces).
+
+Writes are atomic (temp file + rename), so a concurrent reader never observes
+an empty or partially written value — including a multi-item `session-list
+add`, which is visible all-or-nothing. Every mutating command
+(`session-set`/`-del`/`-incr`/`-decr` and `session-list`
+`add`/`rm`/`rm-all`/`clear`/`pop`) additionally takes a per-key lock, so
+parallel subagents can safely hammer the same shared key.
+
+All tools accept `--help`/`-h`. To use a key that itself starts with `--`,
+terminate option parsing with a leading `--` (POSIX convention):
+`session-get -- --weird-key`.
+
+Note: most systems periodically clean their temp directory (macOS reaps
+entries unaccessed for a few days), so an extremely long-lived idle session
+could lose its store. This is scratch storage; don't keep anything in it that
+can't be regenerated.
 
 ## Requirements
 
 - Claude Code 2.1+
 - bash, plus standard POSIX utilities (`find`, `grep`, `awk`)
-- For safe concurrent writes (e.g. parallel subagents), every command that
-  modifies a key (`session-set`/`-del`/`-incr`/`-decr` and `session-list`
-  `add`/`rm`/`rm-all`/`clear`) takes a per-key lock using `flock(1)` when
-  available, otherwise `perl` (both ship on macOS and virtually all Linux)
+- `jq` (used by the SubagentStart hook to read the agent id; without it each
+  subagent still gets an isolated namespace, just under a generated UUID)
+- Per-key locking uses `flock(1)` when available, otherwise `perl`
+  (both ship on macOS and virtually all Linux)
+
+## Testing
+
+```
+./tests/run-tests.sh                          # full suite
+SESSION_STORE_NO_FLOCK=1 ./tests/run-tests.sh # force the perl lock path
+```
+
+CI runs shellcheck plus the suite on Linux and macOS, including a macOS pass
+under the system bash 3.2.
 
 ## License
 
