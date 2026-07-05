@@ -1,5 +1,10 @@
 # claude-session-store
 
+[![CI](https://github.com/vlasky/claude-session-store/actions/workflows/ci.yml/badge.svg)](https://github.com/vlasky/claude-session-store/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fvlasky%2Fclaude-session-store%2Fmaster%2F.claude-plugin%2Fplugin.json&query=%24.version&label=version&color=blue)](CHANGELOG.md)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)
+
 Session-scoped scratch storage for [Claude Code](https://claude.ai/code).
 
 Provides `$CLAUDE_SESSION_DIR` — a temp directory any tool can read/write, automatically cleaned up when the session ends.
@@ -23,6 +28,7 @@ claude --plugin-dir /path/to/claude-session-store
 ```bash
 session-set mykey "some value"
 session-get mykey              # → some value
+printf 'line1\nline2\n' | session-set mykey -   # VALUE=- reads from stdin (multi-line values)
 session-del mykey
 session-incr counter           # → 1 (init 0, then +1)
 session-incr counter 10        # → 11
