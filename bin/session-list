@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # shellcheck source=bin/_session-lock
-source "$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)/_session-lock"
+source "$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)/_session-lock"
 
 usage() {
   cat <<'EOF'
@@ -18,6 +18,8 @@ Commands:
   rm ITEM [ITEM...]        Remove items from the list (first occurrence of each)
   rm-all ITEM [ITEM...]    Remove all occurrences of each item
   has ITEM                 Exit 0 if item is in the list, 1 otherwise
+  pop                      Print and remove the first item (exit 1 if empty);
+                           atomic, so parallel consumers never grab the same item
   count                    Print the number of items
   show                     Print all items (one per line)
   clear                    Remove all items (deletes the key)
@@ -35,17 +37,23 @@ Examples:
   session-list a intersect b       # items common to both
   session-list a union b           # combined, no duplicates
   session-list --shared results add "task done"
+  while item=$(session-list --shared queue pop); do process "$item"; done
 EOF
-  exit 1
+  exit "${1:-1}"
 }
+
+parse_shared_flag "$@"
+set -- ${PARSE_ARGS[@]+"${PARSE_ARGS[@]}"}
+
+# Help must work even when the plugin env isn't active, so check it first.
+if [ "${_SESSION_HELP}" = "1" ]; then
+  usage 0
+fi
 
 if [ -z "${CLAUDE_SESSION_DIR:-}" ]; then
   echo "Error: CLAUDE_SESSION_DIR not set. Is the claude-session-store plugin active?" >&2
   exit 1
 fi
-
-parse_shared_flag "$@"
-set -- ${PARSE_ARGS[@]+"${PARSE_ARGS[@]}"}
 
 if [ $# -lt 2 ]; then
   usage
@@ -97,7 +105,7 @@ esac
 # lock so the locked worker runs identically whether with_lock uses flock(1)
 # or perl.
 case "$CMD" in
-  add|rm|rm-all|clear)
+  add|rm|rm-all|clear|pop)
     if [ "${_SESSION_LOCKED:-}" != "1" ]; then
       with_lock "${STORE_DIR}/.locks/${KEY}" -- \
         env _SESSION_LOCKED=1 _SESSION_SHARED="${_SESSION_SHARED}" "$0" ${_SESSION_SHARED:+--shared} -- "$KEY" "$CMD" "$@"
@@ -112,10 +120,21 @@ case "$CMD" in
       echo "Error: 'add' requires at least one item." >&2
       exit 1
     fi
-    ensure_file
+    # Copy + append + rename (not in-place >>) so lock-free readers see the
+    # whole batch or none of it — the same old-or-new guarantee as key-value
+    # writes. In-place appends exposed a partially added multi-item batch.
+    mkdir -p "${STORE_DIR}/.locks"
+    tmp="${STORE_DIR}/.locks/${KEY}.tmp.$$"
+    trap 'rm -f "$tmp"' EXIT
+    if [ -f "$FILE" ]; then
+      cp "$FILE" "$tmp"
+    else
+      : > "$tmp"
+    fi
     for item in "$@"; do
-      printf '%s\n' "$item" >> "$FILE"
+      printf '%s\n' "$item" >> "$tmp"
     done
+    mv "$tmp" "$FILE"
     ;;
 
   rm)
@@ -180,6 +199,26 @@ case "$CMD" in
       exit 1
     fi
     grep -qxF -- "$1" "$FILE"
+    ;;
+
+  pop)
+    # Atomic take-one for work queues: print and remove the first item under
+    # the key's lock, so parallel consumers never receive the same item (the
+    # show-then-rm alternative has a window where two agents grab one task).
+    # Exit 1 on an empty/missing list so `while item=$(... pop)` terminates.
+    if [ ! -f "$FILE" ] || [ ! -s "$FILE" ]; then
+      exit 1
+    fi
+    mkdir -p "${STORE_DIR}/.locks"
+    tmp="${STORE_DIR}/.locks/${KEY}.tmp.$$"
+    trap 'rm -f "$tmp"' EXIT
+    ITEM=$(head -n 1 "$FILE")
+    tail -n +2 "$FILE" > "$tmp"
+    mv "$tmp" "$FILE"
+    if [ ! -s "$FILE" ]; then
+      rm -f "$FILE"
+    fi
+    printf '%s\n' "$ITEM"
     ;;
 
   count)
@@ -260,7 +299,7 @@ case "$CMD" in
     ;;
 
   *)
-    echo "Error: Unknown command '$CMD'. Use: add, rm, rm-all, has, count, show, clear, diff, intersect, union." >&2
+    echo "Error: Unknown command '$CMD'. Use: add, rm, rm-all, has, pop, count, show, clear, diff, intersect, union." >&2
     exit 1
     ;;
 esac
