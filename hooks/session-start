@@ -1,7 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SESSION_DIR="/tmp/claude-session-${CLAUDE_CODE_SESSION_ID}"
+# Graceful no-op if the harness doesn't provide the env file; there is nowhere
+# to publish $CLAUDE_SESSION_DIR, so creating the dir would only orphan it.
+if [ -z "${CLAUDE_ENV_FILE:-}" ]; then
+  exit 0
+fi
+
+# Validate the session ID before interpolating it into a path, the same way
+# subagent-start validates agent_id: missing/empty would collapse the path to
+# a shared "claude-session-" name, and metacharacters would escape the base
+# dir. Byte-wise case-glob (LC_ALL=C) for the same reasons as valid_key.
+SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
+case "$SESSION_ID" in
+  '' | *[!a-zA-Z0-9_-]* )
+    echo "claude-session-store: missing or unsafe CLAUDE_CODE_SESSION_ID; skipping" >&2
+    exit 0
+    ;;
+esac
+
+# ${TMPDIR:-/tmp}: on macOS $TMPDIR is a per-user 0700 directory, which keeps
+# scratch data out of the world-readable /tmp entirely. /tmp remains the
+# fallback on systems that don't set it. Strip any trailing slash (macOS
+# exports TMPDIR with one).
+BASE="${TMPDIR:-/tmp}"
+BASE="${BASE%/}"
+SESSION_DIR="${BASE}/claude-session-${SESSION_ID}"
+
 # Defense-in-depth: refuse if the path is a symlink, so we never write scratch
 # data through an attacker-planted link. (The session ID is an unpredictable
 # UUID, so planting one is impractical; this is belt-and-suspenders.)
@@ -9,11 +34,53 @@ if [ -L "$SESSION_DIR" ]; then
   echo "claude-session-store: refusing to use symlinked session dir $SESSION_DIR" >&2
   exit 1
 fi
-# umask 077 creates the dir as 0700 directly (/tmp is world-readable, so
-# other local users must not be able to read scratch data). Creating with
-# the right mode avoids a separate chmod that would follow a pre-existing
-# symlink at this path. mkdir -p stays idempotent across repeat SessionStarts.
+# umask 077 creates the dir as 0700 directly (other local users must not be
+# able to read scratch data when the base is /tmp). Creating with the right
+# mode avoids a separate chmod that would follow a pre-existing symlink at
+# this path. mkdir -p stays idempotent across repeat SessionStarts.
 (umask 077; mkdir -p "$SESSION_DIR")
+# mkdir -p leaves a PRE-EXISTING directory's owner and mode untouched, so a
+# stale or pre-planted dir could silently weaken the 0700 guarantee. Refuse
+# anything we don't own (we can't fix that), then re-assert the mode — the
+# symlink recheck plus ownership makes the chmod safe to apply.
+if [ -L "$SESSION_DIR" ] || [ ! -d "$SESSION_DIR" ] || [ ! -O "$SESSION_DIR" ]; then
+  echo "claude-session-store: refusing session dir $SESSION_DIR (not a directory we own)" >&2
+  exit 1
+fi
+chmod 700 "$SESSION_DIR"
+# Refresh the dir's mtime on every SessionStart (including resumes) so the
+# stale-dir sweep below never reaps a session that is still coming back.
+touch "$SESSION_DIR"
+
+# Opportunistic GC: SessionEnd never fires after a crash or kill -9, so
+# orphaned session dirs accumulate. A dir is reaped only when NOTHING inside
+# it (nor the dir itself) has been modified for 7 days — the root dir's own
+# mtime is not a liveness signal, because overwriting an existing key updates
+# only that file. A long-running session that touches any key stays safe.
+# [ -d ] is false for a planted symlink (and rm on one wouldn't follow it);
+# [ -O ] limits the sweep to dirs this user owns. The unmatched-glob literal
+# fails [ -d ] and is skipped.
+for _dir in "$BASE"/claude-session-*; do
+  [ -d "$_dir" ] || continue
+  [ -L "$_dir" ] && continue
+  [ "$_dir" = "$SESSION_DIR" ] && continue
+  [ -O "$_dir" ] || continue
+  if [ -z "$(find "$_dir" -mtime -7 -print 2>/dev/null | head -n 1)" ]; then
+    rm -rf "$_dir" 2>/dev/null || true
+  fi
+done
+
 # %q shell-quotes the path so the sourced env file can't be corrupted or
 # injected if the session ID ever contains shell metacharacters.
 printf 'export CLAUDE_SESSION_DIR=%q\n' "$SESSION_DIR" >> "$CLAUDE_ENV_FILE"
+
+# Put the plugin's CLI tools (session-set/-get/...) on PATH. The emitted line
+# self-guards with a case match, so sourcing it repeatedly never stacks
+# duplicate PATH entries; the grep guard additionally keeps repeat
+# SessionStarts from appending the same line to the env file again.
+PLUGIN_BIN="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")/../bin" && pwd)"
+# shellcheck disable=SC2016  # $PATH must stay literal: it expands at source time
+PATH_LINE=$(printf 'case ":$PATH:" in *:%q:*) ;; *) export PATH=%q:"$PATH" ;; esac' "$PLUGIN_BIN" "$PLUGIN_BIN")
+if ! grep -qxF "$PATH_LINE" "$CLAUDE_ENV_FILE" 2>/dev/null; then
+  printf '%s\n' "$PATH_LINE" >> "$CLAUDE_ENV_FILE"
+fi
