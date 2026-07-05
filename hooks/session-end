@@ -1,7 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SESSION_DIR="/tmp/claude-session-${CLAUDE_CODE_SESSION_ID}"
+# Same validation as session-start: an empty or unsafe session ID must never
+# reach the rm -rf path ("claude-session-" with an empty ID is a name another
+# process could own; metacharacters could escape the base dir).
+SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
+case "$SESSION_ID" in
+  '' | *[!a-zA-Z0-9_-]* )
+    exit 0
+    ;;
+esac
+
+# Must mirror session-start's base-dir computation so we remove the same dir.
+BASE="${TMPDIR:-/tmp}"
+BASE="${BASE%/}"
+SESSION_DIR="${BASE}/claude-session-${SESSION_ID}"
+
+# A symlink here means session-start refused it too; leave it alone rather
+# than deleting a path we never created.
+if [ -L "$SESSION_DIR" ]; then
+  exit 0
+fi
 
 if [ -d "$SESSION_DIR" ]; then
   rm -rf "$SESSION_DIR"
