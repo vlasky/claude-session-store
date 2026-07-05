@@ -4,14 +4,14 @@ Session-scoped scratch storage for Claude Code plugins. Provides `$CLAUDE_SESSIO
 
 ## How it works
 
-1. **SessionStart hook** creates `/tmp/claude-session-<SESSION_ID>` and exports `$CLAUDE_SESSION_DIR` via `CLAUDE_ENV_FILE`.
+1. **SessionStart hook** creates `${TMPDIR:-/tmp}/claude-session-<SESSION_ID>` (0700, ownership verified and mode re-asserted on every start), exports `$CLAUDE_SESSION_DIR` and a PATH entry for `bin/` via `CLAUDE_ENV_FILE`, and garbage-collects this user's session dirs in which nothing has been modified for 7 days (SessionEnd never fires after a crash; contents mtime is the liveness signal, not the root dir's).
 2. **SubagentStart hook** gives each subagent a private dir: creates `<root>/.ns/<agent-id>/`, exports `$CLAUDE_SESSION_ROOT` (the shared root), exports `$CLAUDE_AGENT_NS` (the agent id), and overrides `$CLAUDE_SESSION_DIR` to point at the private dir.
-3. **During the session**, any tool can read/write files in that directory — either directly or via the `session-set`/`session-get` CLI tools.
-4. **SessionEnd hook** receives the `session_id` via stdin JSON and `rm -rf`s the entire session directory (including all private namespaces).
+3. **During the session**, any tool can read/write files in that directory — either directly or via the `session-set`/`session-get` CLI tools. Writes are atomic (temp + rename); mutating commands take a per-key lock.
+4. **SessionEnd hook** validates `$CLAUDE_CODE_SESSION_ID` and `rm -rf`s the entire session directory (including all private namespaces).
 
-## CLI tools (added to PATH)
+## CLI tools (added to PATH by the SessionStart hook)
 
-All commands accept `--shared` to operate on the shared namespace (visible to all agents).
+All commands accept `--shared` to operate on the shared namespace (visible to all agents), and `--help`/`-h`.
 
 ```
 session-set [--shared] KEY VALUE          Store a value (use VALUE=- to read from stdin)
@@ -20,9 +20,11 @@ session-del [--shared] KEY                Delete a key
 session-incr [--shared] KEY [AMOUNT]      Increment numeric key (default +1, inits to 0)
 session-decr [--shared] KEY [AMOUNT]      Decrement numeric key (default -1, inits to 0)
 session-keys [--shared]                   List all stored keys
-session-list [--shared] KEY COMMAND ...   Manage ordered lists (add, rm, rm-all, has, count, show, clear,
-                                          diff OTHER, intersect OTHER, union OTHER)
+session-list [--shared] KEY COMMAND ...   Manage ordered lists (add, rm, rm-all, has, pop, count, show,
+                                          clear, diff OTHER, intersect OTHER, union OTHER)
 ```
+
+`session-list KEY pop` prints and removes the first item atomically (exit 1 when empty) — the primitive for distributing a shared work queue across parallel subagents without two of them grabbing the same item.
 
 ## Agent namespacing
 
@@ -47,14 +49,22 @@ session-set --shared -- --weird-key --some-value
 ## Plugin structure
 
 ```
-.claude-plugin/plugin.json   Plugin manifest (registers hooks)
-hooks/session-start          Creates session dir, exports env var
+.claude-plugin/plugin.json   Plugin manifest
+hooks/hooks.json             Registers the lifecycle hooks
+hooks/session-start          Creates session dir, exports env vars + PATH, GCs stale dirs
 hooks/subagent-start         Assigns CLAUDE_AGENT_NS for namespace isolation
 hooks/session-end            Cleans up session dir
-bin/session-{set,get,del,incr,decr,keys}  CLI tools for key-value access
+bin/_session-lock            Shared helpers: parsing, validation, locking, atomic writes
+bin/session-{set,get,del,incr,decr,keys,list}  CLI tools
 skills/session/SKILL.md      Teaches Claude when/how to use session storage
+tests/run-tests.sh           Self-contained test suite (plain bash, no framework)
+.github/workflows/ci.yml     shellcheck + tests on Linux and macOS (incl. bash 3.2)
 CLAUDE.md                    This file
 ```
+
+## Testing
+
+Run `./tests/run-tests.sh` after any change to `bin/` or `hooks/` (and `SESSION_STORE_NO_FLOCK=1 ./tests/run-tests.sh` to exercise the perl lock path). Shellcheck all changed scripts.
 
 ## Updating
 
@@ -72,5 +82,7 @@ Then run `/reload-plugins` inside your session to apply.
 - **Subagent namespacing by env override, not by CLI logic** — SubagentStart points `$CLAUDE_SESSION_DIR` at the private dir and exposes the shared root as `$CLAUDE_SESSION_ROOT`. CLI tools just read one of those two vars; they never interpolate `agent_id` into a path. This means direct file access (`echo > $CLAUDE_SESSION_DIR/foo`) and `session-set foo` end up in the same namespace, eliminating the silent-bypass footgun.
 - **`agent_id` is path-validated at the hook** — sanitized against `[A-Za-z0-9_-]+`; anything else triggers the UUID fallback. Closes the `..`-in-`agent_id` traversal vector.
 - **Leading-only `--shared` + `--` terminator** — mid-arg `--shared` is treated as a positional, so `session-list deck add a --shared b` doesn't silently switch namespaces. To store the literal value `--shared`, just put it in value position: `session-set --shared key --shared` (parsing stops at the first positional). Use a leading `--` only when the key itself starts with `--`.
-- **Plain files in /tmp** — no database, no dependencies. Fast, portable, trivially debuggable.
+- **Plain files in `${TMPDIR:-/tmp}`** — no database, no dependencies. Fast, portable, trivially debuggable. On macOS `$TMPDIR` is per-user 0700, keeping scratch data out of the world-readable /tmp entirely; the dir itself is 0700 either way.
+- **Atomic writes (temp + rename)** — readers are deliberately lock-free, so writers must never truncate in place; `atomic_write` in `bin/_session-lock` guarantees a reader sees the old value or the new one, never a torn state.
+- **Session ID validated at both hooks** — same `[A-Za-z0-9_-]+` charset as `agent_id`. An empty ID would collapse the path to a name any process could own (fatal for session-end's `rm -rf`); metacharacters could escape the base dir.
 - **No permissions model** — all tools in the session can access the shared root. Private namespaces provide isolation, not security.
